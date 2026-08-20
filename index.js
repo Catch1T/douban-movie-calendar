@@ -4,64 +4,89 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const ics = require('ics');
 
-const DOUBAN_LATER_URL = 'https://movie.douban.com/cinema/later/beijing/';
+// ✅ 新版即将上映页面地址
+const DOUBAN_COMING_URL = 'https://movie.douban.com/coming';
 
 async function fetchComingMovies() {
   try {
-    const { data: html } = await axios.get(DOUBAN_LATER_URL, {
+    const { data: html } = await axios.get(DOUBAN_COMING_URL, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         'Referer': 'https://movie.douban.com/',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
     });
 
     const $ = cheerio.load(html);
     const movies = [];
 
-    $('#showing-soon .item').each((_, el) => {
+    // ✅ 新版页面使用 table 结构，尝试多种可能的选择器
+    // 优先尝试 tbody tr（标准表格）
+    let rows = $('table tbody tr');
+
+    // 如果表格没匹配到，尝试其他可能的列表结构
+    if (rows.length === 0) {
+      rows = $('.list-item, .item, [class*="movie"], [class*="film"]');
+    }
+
+    // 如果仍然没匹配到，把整个 HTML 打印出来用于调试
+    if (rows.length === 0) {
+      console.warn('⚠️ 未匹配到任何电影元素，输出页面前2000字符用于调试：');
+      console.warn(html.substring(0, 2000));
+      return [];
+    }
+
+    rows.each((_, el) => {
       const $el = $(el);
-      const title = $el.find('.title a').text().trim();
-      const url = $el.find('.title a').attr('href') || '';
-      const dateStr = $el.find('.release-date').text().trim();
-      const wishText = $el.find('.wish-count').text().trim();
-      const wishCount = parseInt(wishText.replace(/[^\d]/g, ''), 10) || 0;
+      const cells = $el.find('td');
 
-      if (!title || !dateStr) return;
+      // 表格模式：td[0]=日期, td[1]=片名, td[2]=类型, td[3]=国家, td[4]=想看
+      if (cells.length >= 2) {
+        const dateStr = $(cells[0]).text().trim();
+        const titleEl = $(cells[1]).find('a').first();
+        const title = titleEl.text().trim() || $(cells[1]).text().trim();
+        const url = titleEl.attr('href') || '';
+        const wishText = cells.length >= 5 ? $(cells[4]).text().trim() : '';
+        const wishCount = parseInt(wishText.replace(/[^\d]/g, ''), 10) || 0;
 
-      let year, month, day;
+        if (!title || !dateStr) return;
 
-      // 匹配 "08月22日" 或 "2026年08月22日"
-      const fullMatch = dateStr.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-      if (fullMatch) {
-        year = parseInt(fullMatch[1]);
-        month = parseInt(fullMatch[2]);
-        day = parseInt(fullMatch[3]);
-      } else {
-        const shortMatch = dateStr.match(/(\d{1,2})月(\d{1,2})日/);
-        if (shortMatch) {
-          const now = new Date();
-          year = now.getFullYear();
-          month = parseInt(shortMatch[1]);
-          day = parseInt(shortMatch[2]);
-          if (month < now.getMonth() + 1) {
-            year += 1;
-          }
+        const parsed = parseDate(dateStr);
+        if (!parsed) {
+          console.warn(`⚠️ 无法解析日期: "${dateStr}" (${title})`);
+          return;
         }
-      }
 
-      if (!year || !month || !day) {
-        console.warn(`⚠️ 无法解析日期: "${dateStr}" (${title})`);
-        return;
-      }
+        movies.push({
+          title,
+          releaseDate: `${parsed.year}-${String(parsed.month).padStart(2, '0')}-${String(parsed.day).padStart(2, '0')}`,
+          ...parsed,
+          wishCount,
+          url: url.startsWith('http') ? url : `https://movie.douban.com${url}`,
+        });
+      } else {
+        // 非表格模式：尝试从文本中提取
+        const text = $el.text().trim();
+        const linkEl = $el.find('a').first();
+        const title = linkEl.text().trim() || text.split(/\s+/)[1] || '';
+        const url = linkEl.attr('href') || '';
+        const dateMatch = text.match(/(\d{1,2})月(\d{1,2})日/);
+        const wishMatch = text.match(/(\d+)\s*人\s*想看/);
 
-      movies.push({
-        title,
-        releaseDate: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
-        year, month, day,
-        wishCount,
-        url: url.startsWith('http') ? url : `https://movie.douban.com${url}`,
-      });
+        if (!title || !dateMatch) return;
+
+        const parsed = parseDate(`${dateMatch[1]}月${dateMatch[2]}日`);
+        if (!parsed) return;
+
+        movies.push({
+          title,
+          releaseDate: `${parsed.year}-${String(parsed.month).padStart(2, '0')}-${String(parsed.day).padStart(2, '0')}`,
+          ...parsed,
+          wishCount: wishMatch ? parseInt(wishMatch[1], 10) : 0,
+          url: url.startsWith('http') ? url : `https://movie.douban.com${url}`,
+        });
+      }
     });
 
     console.log(`📥 共获取 ${movies.length} 部即将上映电影`);
@@ -71,6 +96,33 @@ async function fetchComingMovies() {
     console.error('❌ 请求豆瓣页面失败:', err.message);
     return [];
   }
+}
+
+function parseDate(dateStr) {
+  let year, month, day;
+
+  // 匹配 "2026年08月22日" 或 "2026-08-22"
+  const fullMatch = dateStr.match(/(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})/);
+  if (fullMatch) {
+    year = parseInt(fullMatch[1]);
+    month = parseInt(fullMatch[2]);
+    day = parseInt(fullMatch[3]);
+  } else {
+    // 匹配 "08月22日"
+    const shortMatch = dateStr.match(/(\d{1,2})月(\d{1,2})日/);
+    if (shortMatch) {
+      const now = new Date();
+      year = now.getFullYear();
+      month = parseInt(shortMatch[1]);
+      day = parseInt(shortMatch[2]);
+      if (month < now.getMonth() + 1) {
+        year += 1;
+      }
+    }
+  }
+
+  if (!year || !month || !day) return null;
+  return { year, month, day };
 }
 
 function generateICS(movies) {
