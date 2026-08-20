@@ -3,22 +3,11 @@ const path = require('path');
 const axios = require('axios');
 const ics = require('ics');
 
-const DOUBAN_API = 'https://movie.douban.com/j/search_subjects';
+const DOUBAN_API = 'https://movie.douban.com/j/cinema/later/beijing/';
 
 async function fetchComingMovies() {
-  const allMovies = [];
-  let pageStart = 0;
-  const pageLimit = 50;
-
-  while (true) {
+  try {
     const { data } = await axios.get(DOUBAN_API, {
-      params: {
-        type: 'movie',
-        tag: '即将上映',
-        sort: 'recommend',
-        page_limit: pageLimit,
-        page_start: pageStart,
-      },
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Referer': 'https://movie.douban.com/cinema/later/beijing/',
@@ -26,34 +15,67 @@ async function fetchComingMovies() {
     });
 
     const subjects = data.subjects || [];
-    if (subjects.length === 0) break;
-    allMovies.push(...subjects);
-    pageStart += pageLimit;
-    await new Promise(r => setTimeout(r, 1500));
-  }
+    console.log(`📥 共获取 ${subjects.length} 部即将上映电影`);
 
-  console.log(`📥 共获取 ${allMovies.length} 部即将上映电影`);
-  return allMovies.filter(m => m.release_date).map(m => ({
-    title: m.title,
-    releaseDate: m.release_date,
-    wishCount: m.wish_count,
-    rating: m.rate ? `${m.rate}分` : '暂无评分',
-    url: m.url,
-  }));
+    return subjects
+      .filter(m => m.release_date)
+      .map(m => {
+        let year, month, day;
+        const dateStr = m.release_date;
+
+        const fullMatch = dateStr.match(/(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})/);
+        if (fullMatch) {
+          year = parseInt(fullMatch[1]);
+          month = parseInt(fullMatch[2]);
+          day = parseInt(fullMatch[3]);
+        } else {
+          const shortMatch = dateStr.match(/(\d{1,2})月(\d{1,2})日/);
+          if (shortMatch) {
+            const now = new Date();
+            year = now.getFullYear();
+            month = parseInt(shortMatch[1]);
+            day = parseInt(shortMatch[2]);
+            if (month < now.getMonth() + 1) {
+              year += 1;
+            }
+          }
+        }
+
+        if (!year || !month || !day) {
+          console.warn(`⚠️ 无法解析日期: "${dateStr}" (${m.title})`);
+          return null;
+        }
+
+        return {
+          title: m.title,
+          releaseDate: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+          year, month, day,
+          wishCount: m.wish || 0,
+          rating: m.rate ? `${m.rate}分` : '暂无评分',
+          url: m.url || `https://movie.douban.com/subject/${m.id}/`,
+        };
+      })
+      .filter(m => m !== null);
+
+  } catch (err) {
+    console.error('❌ 请求豆瓣API失败:', err.message);
+    return [];
+  }
 }
 
 function generateICS(movies) {
-  const events = movies.map(m => {
-    const [year, month, day] = m.releaseDate.split('-').map(Number);
-    return {
-      title: `🎬 ${m.title} 上映`,
-      start: [year, month, day],
-      duration: { hours: 2 },
-      description: [`想看: ${m.wishCount}人`, `评分: ${m.rating}`, `豆瓣链接: ${m.url}`].join('\n'),
-      url: m.url,
-      alarms: [{ action: 'display', trigger: { hours: 1, before: true } }],
-    };
-  });
+  const events = movies.map(m => ({
+    title: `🎬 ${m.title} 上映`,
+    start: [m.year, m.month, m.day],
+    duration: { hours: 2 },
+    description: [
+      `想看: ${m.wishCount}人`,
+      `评分: ${m.rating}`,
+      `豆瓣链接: ${m.url}`
+    ].join('\n'),
+    url: m.url,
+    alarms: [{ action: 'display', trigger: { hours: 1, before: true } }],
+  }));
 
   const { error, value } = ics.createEvents(events);
   if (error) throw new Error(`ICS生成失败: ${error.message}`);
@@ -62,9 +84,10 @@ function generateICS(movies) {
 
 async function main() {
   const movies = await fetchComingMovies();
+
   if (movies.length === 0) {
     console.warn('⚠️ 没有已定档电影，跳过生成');
-    return;
+    process.exit(0);
   }
 
   const icsContent = generateICS(movies);
