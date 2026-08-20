@@ -1,64 +1,74 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const cheerio = require('cheerio');
 const ics = require('ics');
 
-const DOUBAN_API = 'https://movie.douban.com/j/cinema/later/beijing/';
+const DOUBAN_LATER_URL = 'https://movie.douban.com/cinema/later/beijing/';
 
 async function fetchComingMovies() {
   try {
-    const { data } = await axios.get(DOUBAN_API, {
+    const { data: html } = await axios.get(DOUBAN_LATER_URL, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Referer': 'https://movie.douban.com/cinema/later/beijing/',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Referer': 'https://movie.douban.com/',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
     });
 
-    const subjects = data.subjects || [];
-    console.log(`📥 共获取 ${subjects.length} 部即将上映电影`);
+    const $ = cheerio.load(html);
+    const movies = [];
 
-    return subjects
-      .filter(m => m.release_date)
-      .map(m => {
-        let year, month, day;
-        const dateStr = m.release_date;
+    $('#showing-soon .item').each((_, el) => {
+      const $el = $(el);
+      const title = $el.find('.title a').text().trim();
+      const url = $el.find('.title a').attr('href') || '';
+      const dateStr = $el.find('.release-date').text().trim();
+      const wishText = $el.find('.wish-count').text().trim();
+      const wishCount = parseInt(wishText.replace(/[^\d]/g, ''), 10) || 0;
 
-        const fullMatch = dateStr.match(/(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})/);
-        if (fullMatch) {
-          year = parseInt(fullMatch[1]);
-          month = parseInt(fullMatch[2]);
-          day = parseInt(fullMatch[3]);
-        } else {
-          const shortMatch = dateStr.match(/(\d{1,2})月(\d{1,2})日/);
-          if (shortMatch) {
-            const now = new Date();
-            year = now.getFullYear();
-            month = parseInt(shortMatch[1]);
-            day = parseInt(shortMatch[2]);
-            if (month < now.getMonth() + 1) {
-              year += 1;
-            }
+      if (!title || !dateStr) return;
+
+      let year, month, day;
+
+      // 匹配 "08月22日" 或 "2026年08月22日"
+      const fullMatch = dateStr.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+      if (fullMatch) {
+        year = parseInt(fullMatch[1]);
+        month = parseInt(fullMatch[2]);
+        day = parseInt(fullMatch[3]);
+      } else {
+        const shortMatch = dateStr.match(/(\d{1,2})月(\d{1,2})日/);
+        if (shortMatch) {
+          const now = new Date();
+          year = now.getFullYear();
+          month = parseInt(shortMatch[1]);
+          day = parseInt(shortMatch[2]);
+          if (month < now.getMonth() + 1) {
+            year += 1;
           }
         }
+      }
 
-        if (!year || !month || !day) {
-          console.warn(`⚠️ 无法解析日期: "${dateStr}" (${m.title})`);
-          return null;
-        }
+      if (!year || !month || !day) {
+        console.warn(`⚠️ 无法解析日期: "${dateStr}" (${title})`);
+        return;
+      }
 
-        return {
-          title: m.title,
-          releaseDate: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
-          year, month, day,
-          wishCount: m.wish || 0,
-          rating: m.rate ? `${m.rate}分` : '暂无评分',
-          url: m.url || `https://movie.douban.com/subject/${m.id}/`,
-        };
-      })
-      .filter(m => m !== null);
+      movies.push({
+        title,
+        releaseDate: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+        year, month, day,
+        wishCount,
+        url: url.startsWith('http') ? url : `https://movie.douban.com${url}`,
+      });
+    });
+
+    console.log(`📥 共获取 ${movies.length} 部即将上映电影`);
+    return movies;
 
   } catch (err) {
-    console.error('❌ 请求豆瓣API失败:', err.message);
+    console.error('❌ 请求豆瓣页面失败:', err.message);
     return [];
   }
 }
@@ -70,7 +80,6 @@ function generateICS(movies) {
     duration: { hours: 2 },
     description: [
       `想看: ${m.wishCount}人`,
-      `评分: ${m.rating}`,
       `豆瓣链接: ${m.url}`
     ].join('\n'),
     url: m.url,
