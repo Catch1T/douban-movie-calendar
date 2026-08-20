@@ -21,7 +21,7 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install axios ics
+        run: npm install axios cheerio ics
 
       - name: Generate calendar
         run: node index.js
